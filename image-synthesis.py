@@ -1,88 +1,107 @@
-import os
-import numpy as np
 import tensorflow as tf
-from tensorflow.keras import layers, Model, Sequential
-from tensorflow.keras.optimizers import Adam
+from tensorflow.keras import layers, models
+import numpy as np
 import matplotlib.pyplot as plt
-from PIL import Image
 
-def load_data(image_folder, caption_file, limit=20):
-    imgs, image_paths, captions = [], [], []
-    unique_images = set()
-    with open(caption_file, 'r') as file:
-        lines = file.readlines()
-    for line in lines:
-        img_name, caption = line.strip().split(',', 1)
-        img_path = os.path.join(image_folder, img_name)
-        if len(unique_images) >= limit:
-            break
-        if img_name not in unique_images and os.path.exists(img_path):
-            unique_images.add(img_name)
-            imgs.append(img_name)
-            image_paths.append(img_path)
-            captions.append(caption)
-    return imgs, image_paths, captions
+def build_generator(latent_dim):
+    model = models.Sequential()
+    model.add(layers.Dense(128, activation='relu', input_dim=latent_dim))
+    model.add(layers.Dense(256, activation='relu'))
+    model.add(layers.Dense(512, activation='relu'))
+    model.add(layers.Dense(1024, activation='relu'))
+    model.add(layers.Dense(28*28, activation='tanh'))
+    model.add(layers.Reshape((28, 28,1)))
+    return model
 
-image_folder = r"Images"
-caption_file = r"captions.txt"
+def build_discriminator(input_shape):
+    model = models.Sequential()
+    model.add(layers.Flatten(input_shape=input_shape))
+    model.add(layers.Dense(512, activation='relu'))
+    model.add(layers.Dense(256, activation='relu'))
+    model.add(layers.Dense(1, activation='sigmoid'))  
+    return model
 
-imgs, image_paths, captions = load_data(image_folder, caption_file, limit=20)
+def build_gan(generator, discriminator):
+    discriminator.trainable = False  
+    model = models.Sequential()
+    model.add(generator)
+    model.add(discriminator)
+    return model
 
-def display_images(image_paths, limit=10):
+latent_dim = 100
+image_shape = (28, 28)
+
+discriminator = build_discriminator(image_shape)
+discriminator.compile(loss='binary_crossentropy', optimizer='adam', metrics=['accuracy'])
+
+generator = build_generator(latent_dim)
+
+gan = build_gan(generator, discriminator)
+gan.compile(loss='binary_crossentropy', optimizer='adam')
+
+(x_train, _), (_, _) = tf.keras.datasets.mnist.load_data()
+
+x_train = (x_train.astype(np.float32) - 127.5) / 127.5
+x_train = np.expand_dims(x_train, axis=-1)
+
+batch_size = 64
+epochs = 10
+sample_interval = 5  
+
+def train_gan(epochs, batch_size, sample_interval):
+    half_batch = batch_size // 2
+
+    for epoch in range(epochs):
+        
+        idx = np.random.randint(0, x_train.shape[0], half_batch)
+        real_images = x_train[idx]
+        fake_images = generator.predict(np.random.randn(half_batch, latent_dim))
+
+        
+        real_labels = np.ones((half_batch, 1))
+        fake_labels = np.zeros((half_batch, 1))
+
+        
+        d_loss_real = discriminator.train_on_batch(real_images, real_labels)
+        d_loss_fake = discriminator.train_on_batch(fake_images, fake_labels)
+        d_loss = 0.5 * np.add(d_loss_real, d_loss_fake)
+
+        
+        noise = np.random.randn(batch_size, latent_dim)
+        valid_labels = np.ones((batch_size, 1))  
+        g_loss = gan.train_on_batch(noise, valid_labels)
+
+        
+        if epoch % sample_interval == 0:
+            print(f"{epoch} [D loss: {d_loss[0]} | D accuracy: {100*d_loss[1]}] [G loss: {g_loss}]")
+            save_generated_images(epoch)
+
+def save_generated_images(epoch, examples=10, dim=(1, 10), figsize=(10, 1)):
+    noise = np.random.randn(examples, latent_dim)
+    generated_images = generator.predict(noise)
+    plt.figure(figsize=figsize)
+    for i in range(examples):
+        plt.subplot(dim[0], dim[1], i+1)
+        plt.imshow(generated_images[i], cmap='gray')
+        plt.axis('off')
+    plt.tight_layout()
+    plt.savefig(f"gan_generated_image_{epoch}.png")
+    plt.close()
+
+def generate_new_images(num_images=10):
+    noise = np.random.randn(num_images, latent_dim)  
+    generated_images = generator.predict(noise)
+    
+    
+    generated_images = (generated_images + 1) / 2.0
+    
+    
     plt.figure(figsize=(10, 10))
-    for i in range(min(limit, len(image_paths))):
-        img = Image.open(image_paths[i]).resize((64, 64))
+    for i in range(num_images):
         plt.subplot(5, 5, i + 1)
-        plt.imshow(img)
+        plt.imshow(generated_images[i, :, :, 0], cmap='gray')
         plt.axis('off')
     plt.show()
 
-display_images(image_paths)
-
-
-def preprocess_images(image_paths):
-    images = []
-    for img_path in image_paths:
-        img = Image.open(img_path).resize((64, 64))
-        img = np.array(img) / 127.5 - 1.0  
-        images.append(img)
-    return np.array(images)
-
-images = preprocess_images(image_paths)
-
-
-def build_generator():
-    noise_input = layers.Input(shape=(100,))
-    text_input = layers.Input(shape=(100,))
-    combined_input = layers.Concatenate()([noise_input, text_input])
-
-    x = layers.Dense(8 * 8 * 256, activation="relu")(combined_input)
-    x = layers.Reshape((8, 8, 256))(x)
-
-    x = layers.Conv2DTranspose(128, kernel_size=4, strides=2, padding="same", activation="relu")(x)
-    x = layers.Conv2DTranspose(64, kernel_size=4, strides=2, padding="same", activation="relu")(x)
-    output = layers.Conv2DTranspose(3, kernel_size=4, strides=2, padding="same", activation="tanh")(x)
-
-    return Model([noise_input, text_input], output, name="Generator")
-
-
-def build_discriminator():
-    image_input = layers.Input(shape=(64, 64, 3))
-    text_input = layers.Input(shape=(100,))
-
-    x = layers.Conv2D(64, kernel_size=4, strides=2, padding="same", activation="leaky_relu")(image_input)
-    x = layers.Conv2D(128, kernel_size=4, strides=2, padding="same", activation="leaky_relu")(x)
-    x = layers.Flatten()(x)
-
-    combined_input = layers.Concatenate()([x, text_input])
-    x = layers.Dense(256, activation="leaky_relu")(combined_input)
-    output = layers.Dense(1, activation="sigmoid")(x)
-
-    return Model([image_input, text_input], output, name="Discriminator")
-
-
-generator = build_generator()
-discriminator = build_discriminator()
-
-generator.summary()
-discriminator.summary()
+train_gan(epochs, batch_size, sample_interval)
+generate_new_images(num_images=10)
